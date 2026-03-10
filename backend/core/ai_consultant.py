@@ -193,6 +193,16 @@ class AIConsultant:
             "data and regulatory context above."
         )
 
+        # --- MACHINE LEARNING INSIGHT INJECTION ---
+        ml_risk_score = building_context.get("ml_risk_score")
+        if ml_risk_score is not None:
+            prompt += (
+                f"\n\n--- MACHINE LEARNING INSIGHT ---\n"
+                f"Our local predictive model analyzed the simulation trajectories and calculated a "
+                f"Crowd Crush Risk Score of {ml_risk_score}/10 based on agent density and flow velocity. "
+                "Please mention this risk score in your analysis and factor it into the urgency of your solution.\n"
+            )
+
         return prompt
 
     # ------------------------------------------------------------------

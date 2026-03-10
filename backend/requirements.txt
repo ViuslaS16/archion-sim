@@ -1,0 +1,26 @@
+# Core API
+fastapi
+uvicorn[standard]
+
+# 3D / Geometry
+trimesh
+shapely
+scipy
+numpy
+
+# PDF reports
+reportlab
+matplotlib
+
+# Environment
+python-dotenv
+
+# LLM (Gemini)
+google-generativeai>=0.3.2
+
+# MARL training (optional — only needed if running marl/train.py)
+# Install separately to avoid large download when just running the server:
+#   pip install torch>=2.0.0 gymnasium tqdm
+# torch>=2.0.0
+# gymnasium>=0.29.0
+# tqdm

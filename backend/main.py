@@ -6,10 +6,16 @@ import traceback
 import uuid
 from pathlib import Path
 
+# Load .env file so GEMINI_API_KEY and other secrets are available
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
 from core.geometry import process_model
 from sim.engine import SimulationEngine
@@ -128,6 +134,7 @@ async def process_model_endpoint(file: UploadFile = File(...)):
         "obstacles": result.obstacles,
         "centerOffset": result.center_offset,
         "floorArea": result.floor_area,
+        "floorZ": result.floor_z,
         "modelUrl": f"/static/models/{model_filename}",
         "modelFormat": model_format,
     }
@@ -350,10 +357,118 @@ async def start_simulation_endpoint(req: SimulationRequest):
     except Exception:
         pass
 
+    # Reset LLM brain call counter so each simulation gets a fresh budget
+    try:
+        from sim.llm_brain import reset_llm_brain
+        reset_llm_brain()
+    except Exception:
+        pass
+
     threading.Thread(
         target=_run_simulation_background, args=(req,), daemon=True
     ).start()
     return {"status": "started", "message": "Simulation Started"}
+
+
+@app.get("/api/simulation/stream")
+async def stream_simulation_endpoint(
+    n_standard: int = 2,
+    n_specialist: int = 0,
+    seed: int = 42,
+):
+    """SSE endpoint: streams simulation frames in real-time as they are computed.
+    
+    The frontend connects with EventSource and receives one frame per ~100ms.
+    Gemini is called every 3 seconds for strategic goals AND immediately when a wall is detected.
+    """
+    global _cached_geometry
+
+    boundaries = None
+    obstacles = []
+
+    if _cached_geometry:
+        boundaries = _cached_geometry.get("boundary_coords")
+        obstacles = _cached_geometry.get("wall_segments", [])
+
+    if not boundaries:
+        boundaries = [[-5, -5], [5, -5], [5, 5], [-5, 5]]
+
+    engine = SimulationEngine(
+        boundaries=boundaries,
+        obstacles=obstacles,
+        n_standard=n_standard,
+        n_specialist=n_specialist,
+        seed=seed,
+    )
+
+    def event_generator():
+        global _sim_status, _sim_error, _sim_trajectories
+        global _analytics_data, _compliance_status, _compliance_report, _compliance_error
+        
+        with _sim_lock:
+            _sim_status = "running"
+            _sim_trajectories.clear()
+            _sim_error = None
+            
+        with _analytics_lock:
+            _analytics_data = None
+            
+        with _compliance_lock:
+            _compliance_status = "idle"
+            
+        local_traj = {}
+        try:
+            for frame_idx, frame_data in engine.stream():
+                local_traj[str(frame_idx)] = frame_data
+                payload = json.dumps({"frame": frame_idx, "agents": frame_data})
+                yield {"event": "frame", "data": payload}
+                
+            with _sim_lock:
+                _sim_trajectories.update(local_traj)
+                _sim_status = "done"
+
+            print("[event_generator] Finished streaming. Running compliance audit...")
+            # Run compliance audit immediately after sim completes streaming
+            with _compliance_lock:
+                _compliance_status = "running"
+            from core.compliance import ComplianceChecker
+            try:
+                checker = ComplianceChecker(_compliance_building_type)
+                geom = _cached_geometry
+                if geom:
+                    print("[event_generator] Starting run_full_audit...")
+                    report = checker.run_full_audit(
+                        wall_segments=geom["wall_segments"],
+                        boundary_coords=geom["boundary_coords"],
+                        mesh_vertices=geom.get("mesh_vertices"),
+                        trajectories=_sim_trajectories,
+                        floor_area=geom.get("floor_area", 0.0),
+                    )
+                    with _compliance_lock:
+                        _compliance_report = report.model_dump()
+                        _compliance_status = "done"
+                    print("[event_generator] Audit complete. Status = done.")
+                else:
+                    print("[event_generator] Geometry is None, skipping audit.")
+                    with _compliance_lock:
+                        _compliance_status = "error"
+                        _compliance_error = "No geometry loaded"
+            except Exception as exc:
+                print(f"[event_generator] Audit crashed: {exc}")
+                traceback.print_exc()
+                with _compliance_lock:
+                    _compliance_error = str(exc)
+                    _compliance_status = "error"
+
+        except Exception as e:
+            with _sim_lock:
+                _sim_status = "error"
+                _sim_error = str(e)
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        finally:
+            yield {"event": "done", "data": json.dumps({"frame": "done"})}
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/get-trajectories")
@@ -434,6 +549,8 @@ async def generate_report(req: ReportRequest | None = None):
         if violations:
             try:
                 from core.ai_consultant import get_consultant
+                from core.ml_predictor import predict_crowd_risk
+                
                 consultant = get_consultant()
                 building_ctx = {
                     "building_type": _compliance_building_type,
@@ -441,6 +558,13 @@ async def generate_report(req: ReportRequest | None = None):
                         _cached_geometry.get("floor_area", 0.0) if _cached_geometry else 0.0
                     ),
                 }
+                
+                # Fetch Summary for ML Prediction
+                summary_stats = analytics_resp.get("data", {}).get("summary", {})
+                risk_score = predict_crowd_risk(summary_stats)
+                if risk_score is not None:
+                    building_ctx["ml_risk_score"] = risk_score
+                    print(f"[ML Predictor] Injected Crowd Crush Risk Score: {risk_score}/10")
                 # Limit to top 5 violations by severity to keep generation fast
                 severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
                 top_violations = sorted(
@@ -512,6 +636,110 @@ async def get_heatmap_image():
     generate_heatmap_png(heatmap_data, output_path)
 
     return FileResponse(path=output_path, media_type="image/png")
+
+
+# ------------------------------------------------------------------
+# MARL inference endpoint (requires trained models in backend/models/)
+# ------------------------------------------------------------------
+
+MODELS_DIR = Path(__file__).parent / "models"
+
+
+class MARLSimRequest(BaseModel):
+    boundaries: list[list[float]]
+    obstacles: list[list[float]] = []
+    exit_pos: list[float] | None = None
+    num_agents: int = 2
+    max_steps: int = 200
+
+
+@app.post("/api/simulation/marl")
+async def run_marl_simulation(req: MARLSimRequest):
+    """Run inference with trained Actor-Critic MARL agents.
+
+    Requires backend/models/agent_0_final.pth … to exist.
+    Train them first: cd backend && python -m marl.train
+    """
+    # Check models exist
+    missing = [
+        str(MODELS_DIR / f"agent_{i}_final.pth")
+        for i in range(req.num_agents)
+        if not (MODELS_DIR / f"agent_{i}_final.pth").exists()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Trained models not found: {missing}. "
+                "Run training first: cd backend && python -m marl.train"
+            ),
+        )
+
+    try:
+        import numpy as np
+        from shapely.geometry import Polygon
+        from marl.gym_environment import BuildingNavEnv
+        from marl.networks import A2CAgent
+
+        # Build environment from uploaded floor plan
+        coords = [tuple(p[:2]) for p in req.boundaries]
+        if coords and coords[0] != coords[-1]:
+            coords.append(coords[0])
+        floor_poly = Polygon(coords)
+
+        env = BuildingNavEnv(
+            floor_polygon=floor_poly,
+            wall_segments=req.obstacles,
+            num_agents=req.num_agents,
+            max_steps=req.max_steps,
+        )
+
+        # Load trained agents
+        agents = [
+            A2CAgent.from_file(str(MODELS_DIR / f"agent_{i}_final.pth"))
+            for i in range(req.num_agents)
+        ]
+
+        # Run inference
+        obs, _ = env.reset(seed=0)
+        trajectories: dict = {}
+
+        for step in range(req.max_steps):
+            actions = []
+            for i, agent in enumerate(agents):
+                action, _ = agent.select_action(obs[i])
+                actions.append(action)
+
+            obs, _rewards, terminated, truncated, info = env.step(
+                np.array(actions, dtype=int)
+            )
+
+            frame: dict[str, dict] = {}
+            for i in range(req.num_agents):
+                pos = info["positions"][i]
+                frame[str(i)] = {
+                    "pos": [round(pos[0], 4), round(pos[1], 4)],
+                    "type": "marl_agent",
+                }
+            trajectories[str(step)] = frame
+
+            if terminated or truncated:
+                break
+
+        return {
+            "status": "done",
+            "frames": len(trajectories),
+            "trajectories": trajectories,
+        }
+
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"MARL dependencies missing: {exc}. Run: pip install torch>=2.0.0 gymnasium",
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # Mount static files AFTER all route definitions so /api routes take priority

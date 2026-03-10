@@ -25,11 +25,11 @@ export interface ViolationCoordinate {
 export interface Violation {
   id: string;
   type:
-    | "corridor_width"
-    | "door_width"
-    | "turning_space"
-    | "ramp_gradient"
-    | "bottleneck";
+  | "corridor_width"
+  | "door_width"
+  | "turning_space"
+  | "ramp_gradient"
+  | "bottleneck";
   severity: "critical" | "high" | "medium" | "low";
   coordinate: ViolationCoordinate;
   measured_value: number;
@@ -68,6 +68,7 @@ export interface GeometryData {
   obstacles: number[][];               // [[x1,y1,x2,y2], ...]
   centerOffset?: [number, number];     // [cx, cy] subtracted during extraction
   floorArea?: number;                  // m² of floor space
+  floorZ?: number;                     // Actual Z height of the floor in 3D model
   modelUrl?: string;
   modelFormat?: "obj" | "glb" | "gltf";
 }

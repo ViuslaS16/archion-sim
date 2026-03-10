@@ -8,6 +8,7 @@ import { ViolationPanel } from "@/components/ViolationMonitor";
 import { AnalyticsDashboard } from "@/components/AnalyticsDashboard";
 import { usePlayback } from "@/hooks/usePlayback";
 import type {
+  AgentFrame,
   GeometryData,
   Trajectories,
   SimPhase,
@@ -134,7 +135,7 @@ export default function Home() {
   }, []);
 
   // ----------------------------------------------------------------
-  // Start simulation
+  // Start simulation — uses real-time SSE streaming instead of batch polling
   // ----------------------------------------------------------------
   const handleRunSim = useCallback(async () => {
     if (!geometry) return;
@@ -144,71 +145,77 @@ export default function Home() {
     setComplianceLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/api/start-simulation`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          boundaries: geometry.boundaries,
-          obstacles: geometry.obstacles,
-        }),
+      const streamUrl = `${API_URL}/api/simulation/stream?n_standard=2&n_specialist=0`;
+      const es = new EventSource(streamUrl);
+
+      let firstFrameReceived = false;
+
+      es.addEventListener("frame", (e: MessageEvent) => {
+        const payload = JSON.parse(e.data) as { frame: number; agents: Record<string, AgentFrame> };
+
+        // ⚡ Only keep the LATEST frame — no accumulation, no spread, no GC pressure
+        // Store as key "0" so the viewer always reads from frame 0 (current live position)
+        setTrajectories({ "0": payload.agents });
+        scrubTo(0);
+
+        if (!firstFrameReceived) {
+          firstFrameReceived = true;
+          // Note: Keep phase as "simulating". We set "completed" only when it's done.
+        }
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `HTTP ${res.status}`);
-      }
 
-      // Poll until done
-      const poll = async (): Promise<Trajectories> => {
-        await new Promise((r) => setTimeout(r, 1000));
-        const r = await fetch(`${API_URL}/api/get-trajectories`);
-        const data = await r.json();
-        if (data.status === "running") return poll();
-        if (!r.ok) throw new Error(data.detail || "Simulation failed");
-        return data as Trajectories;
-      };
+      es.addEventListener("done", async () => {
+        es.close();
+        setPhase("completed");
 
-      const traj = await poll();
-      setTrajectories(traj);
-      scrubTo(0);
-      setPhase("completed");
-      setPlaying(true); // auto-start playback
-      console.log("=== Trajectories Received ===");
-      console.log("Frames:", Object.keys(traj).length);
-      console.log(
-        "Agents:",
-        Object.keys(traj["0"] || {}).length,
-      );
+        // Fetch full trajectories array to allow playback scrubbing
+        try {
+          const tRes = await fetch(`${API_URL}/api/get-trajectories`);
+          const tData = await tRes.json();
+          if (tData && !tData.error && !tData.status) {
+            setTrajectories(tData);
+            scrubTo(0);
+          }
+        } catch (err) {
+          console.error("Failed to fetch full trajectories", err);
+        }
 
-      // Poll compliance report
-      const pollCompliance = async (): Promise<ComplianceReport | null> => {
-        await new Promise((r) => setTimeout(r, 500));
-        const r = await fetch(`${API_URL}/api/compliance/report`);
-        const data = await r.json();
-        if (data.status === "running") return pollCompliance();
-        if (data.status === "done" && data.report)
-          return data.report as ComplianceReport;
-        return null;
-      };
+        // Fetch the generated compliance report
+        try {
+          const res = await fetch(`${API_URL}/api/compliance/report`);
+          const data = await res.json();
+          if (data.status === "done" && data.report) {
+            setComplianceReport(data.report);
+          } else {
+            setError(data.message || data.error || "Failed to load compliance report");
+          }
+        } catch (err) {
+          console.error("Failed to fetch compliance report", err);
+          setError("Compliance fetch failed");
+        } finally {
+          setComplianceLoading(false);
+        }
 
-      const report = await pollCompliance();
-      setComplianceReport(report);
-      setComplianceLoading(false);
-      if (report) {
-        console.log("=== Compliance Report ===");
-        console.log(
-          `Score: ${report.compliance_score}% (${report.status.toUpperCase()})`,
-        );
-        console.log(`Violations: ${report.total_violations}`);
-      }
+        handleRequestAnalytics();
+      });
 
-      // Auto-fetch analytics
-      handleRequestAnalytics();
+      es.addEventListener("error", (e) => {
+        es.close();
+        const msg = (e as MessageEvent).data
+          ? JSON.parse((e as MessageEvent).data).error
+          : "Stream connection failed";
+        setError(msg);
+        setPhase("processing");
+        setComplianceLoading(false);
+      });
+
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
-      setPhase("processing"); // allow retry
+      setPhase("processing");
       setComplianceLoading(false);
     }
   }, [geometry, handleRequestAnalytics, scrubTo, setPlaying]);
+
 
   // ----------------------------------------------------------------
   // Compliance handlers
@@ -290,6 +297,7 @@ export default function Home() {
           modelUrl={geometry.modelUrl}
           modelFormat={geometry.modelFormat}
           centerOffset={geometry.centerOffset}
+          floorZ={geometry.floorZ}
           violations={complianceReport?.violations ?? []}
           highlightedViolationId={highlightedViolationId}
           focusTarget={focusTarget}
@@ -390,8 +398,8 @@ export default function Home() {
             </div>
           )}
 
-          {/* Violation Monitor + Analytics — shown after simulation completes */}
-          {phase === "completed" && (
+          {/* Violation Monitor + Analytics — shown during and after simulation */}
+          {(phase === "simulating" || phase === "completed") && (
             <>
               <ViolationPanel
                 report={complianceReport}

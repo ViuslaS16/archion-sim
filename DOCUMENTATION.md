@@ -1021,47 +1021,59 @@ idle → uploading → processing → simulating → completed
 
 ```
 archion-sim/
+├── .gitignore
+├── AI_RECOMMENDATION_ENGINE.md
+├── DOCUMENTATION.md               # This file
+├── FRONTEND_COMMIT_PLAN.md
+├── SETUP.md
 ├── backend/
+│   ├── .env                       # (Ignored in Git, local environment variables)
 │   ├── main.py                    # FastAPI app, all API endpoints
 │   ├── schemas.py                 # Pydantic models (ComplianceReport, Violation)
 │   ├── core/
-│   │   ├── geometry.py            # 3D model → 2D floor plan extraction
-│   │   ├── compliance.py          # Regulatory compliance checking (5 checks)
-│   │   ├── analytics.py           # Performance metrics computation
 │   │   ├── ai_consultant.py       # Gemini AI recommendation engine
+│   │   ├── analytics.py           # Performance metrics computation
+│   │   ├── chart_generator.py     # Utilities for visual charts
+│   │   ├── compliance.py          # Regulatory compliance checking (5 checks)
+│   │   ├── geometry.py            # 3D model → 2D floor plan extraction
 │   │   ├── knowledge_base.py      # Domain knowledge for AI prompts
+│   │   ├── navigation.py          # Pathfinding and navigation graphs
+│   │   ├── parameter_extractor.py # Extract building metrics
 │   │   ├── regulations.json       # Building regulation thresholds
-│   │   └── report_gen.py          # PDF report generation (11 pages)
+│   │   ├── report_gen.py          # PDF report generation (11 pages)
+│   │   ├── spatial_analyzer.py    # Spatial layout analysis
+│   │   └── validator.py           # Data validation models
+│   ├── reports/                   # Generated PDF reports
 │   ├── sim/
+│   │   ├── data/                  # Simulation data storage
 │   │   └── engine.py              # Pedestrian simulation engine
-│   ├── uploads/                   # Uploaded 3D models (temporary)
-│   └── reports/                   # Generated PDF reports
-│
+│   ├── tests/                     # Backend test configurations
+│   └── uploads/                   # Uploaded 3D models (temporary)
 ├── frontend/
-│   ├── package.json
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── layout.tsx         # Root layout with ErrorBoundary
-│   │   │   ├── page.tsx           # Main app page (state hub)
-│   │   │   └── globals.css        # Global styles
-│   │   ├── components/
-│   │   │   ├── SimViewer.tsx      # 3D Canvas with all R3F components
-│   │   │   ├── Controls.tsx       # Bottom HUD (play, speed, timeline)
-│   │   │   ├── ModelUpload.tsx    # Drag-and-drop file upload
-│   │   │   ├── ModelRenderer.tsx  # OBJ/GLB/glTF model loader
-│   │   │   ├── ViolationMonitor.tsx # Violation markers + panel + AI cards
-│   │   │   ├── AnalyticsDashboard.tsx # Charts, metrics, radar, PDF export
-│   │   │   ├── ErrorBoundary.tsx  # Global error catcher with fallback UI
-│   │   │   └── Providers.tsx      # Client-side provider wrapper
-│   │   ├── hooks/
-│   │   │   └── usePlayback.ts     # rAF-based playback with speed control
-│   │   ├── lib/
-│   │   │   └── theme.ts           # Brand colors, thresholds, utilities
-│   │   └── types/
-│   │       └── simulation.ts      # All TypeScript interfaces
-│   └── public/
-│
-└── DOCUMENTATION.md               # This file
+│   ├── package.json               # Node.js dependencies
+│   ├── tsconfig.json              # TypeScript configuration
+│   ├── public/                    # Static assets
+│   └── src/
+│       ├── app/
+│       │   ├── layout.tsx         # Root layout with ErrorBoundary
+│       │   ├── page.tsx           # Main app page (state hub)
+│       │   └── globals.css        # Global styles
+│       ├── components/
+│       │   ├── AnalyticsDashboard.tsx # Charts, metrics, radar, PDF export
+│       │   ├── Controls.tsx       # Bottom HUD (play, speed, timeline)
+│       │   ├── ErrorBoundary.tsx  # Global error catcher with fallback UI
+│       │   ├── ModelRenderer.tsx  # OBJ/GLB/glTF model loader
+│       │   ├── ModelUpload.tsx    # Drag-and-drop file upload
+│       │   ├── Providers.tsx      # Client-side provider wrapper
+│       │   ├── SimViewer.tsx      # 3D Canvas with all R3F components
+│       │   └── ViolationMonitor.tsx # Violation markers + panel + AI cards
+│       ├── hooks/
+│       │   └── usePlayback.ts     # rAF-based playback with speed control
+│       ├── lib/
+│       │   └── theme.ts           # Brand colors, thresholds, utilities
+│       └── types/
+│           └── simulation.ts      # All TypeScript interfaces
+└── images/                        # General images and assets
 ```
 
 ---

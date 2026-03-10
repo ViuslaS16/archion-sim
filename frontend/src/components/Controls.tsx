@@ -85,11 +85,10 @@ export default function Controls({
         <button
           onClick={onRunSim}
           disabled={!canRun}
-          className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition ${
-            canRun
+          className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition ${canRun
               ? "bg-cyan-600 text-white hover:bg-cyan-500"
               : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
-          }`}
+            }`}
         >
           {phase === "simulating" ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -167,7 +166,7 @@ export default function Controls({
         {/* 2D/3D toggle */}
         <button
           onClick={onToggleViewMode}
-          disabled={!canPlay && phase !== "processing"}
+          disabled={phase === "uploading"}
           className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-2 text-xs font-medium text-zinc-300 transition hover:bg-zinc-700 disabled:opacity-40"
         >
           {viewMode === "3d" ? (
@@ -190,13 +189,12 @@ export default function Controls({
       {/* Phase indicator */}
       <div className="mt-2 text-center">
         <span
-          className={`text-[10px] font-mono uppercase tracking-widest ${
-            isWorking
+          className={`text-[10px] font-mono uppercase tracking-widest ${isWorking
               ? "text-amber-400"
               : phase === "completed"
                 ? "text-green-400"
                 : "text-zinc-600"
-          }`}
+            }`}
         >
           {phase}
         </span>

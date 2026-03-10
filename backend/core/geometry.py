@@ -32,31 +32,41 @@ class ExtractionResult:
 
 
 def load_mesh(file_path: str | Path) -> trimesh.Trimesh:
-    """Load a 3D mesh from disk and merge scenes."""
+    """Load a 3D mesh from disk and merge scenes, applying transformations."""
     loaded = trimesh.load(str(file_path))
     if isinstance(loaded, trimesh.Scene):
-        meshes = [g for g in loaded.geometry.values() if isinstance(g, trimesh.Trimesh)]
-        if not meshes:
+        # dump() applies all node transforms and returns the instanced geometry
+        dumped = loaded.dump(concatenate=True)
+        if isinstance(dumped, list):
+            if not dumped:
+                raise ValueError("Scene contains no valid meshes")
+            loaded = trimesh.util.concatenate(dumped)
+        elif dumped is None:
             raise ValueError("Scene contains no valid meshes")
-        loaded = trimesh.util.concatenate(meshes)
+        else:
+            loaded = dumped
+
     if not isinstance(loaded, trimesh.Trimesh):
         raise ValueError(f"Unsupported geometry type: {type(loaded)}")
     return loaded
 
 
 def _normalize_up_axis(mesh: trimesh.Trimesh, file_path: str | Path) -> None:
-    """Rotate Y-up models to Z-up."""
-    ext = Path(file_path).suffix.lower()
+    """Rotate Y-up models to Z-up, dynamically based on bounding box extents and file format."""
+    extents = mesh.bounds[1] - mesh.bounds[0]
     needs_rotation = False
 
-    if ext in (".glb", ".gltf"):
+    file_ext = str(file_path).lower()
+    if file_ext.endswith('.glb') or file_ext.endswith('.gltf'):
+        # GLTF/GLB formats are strictly Y-up by specification
         needs_rotation = True
-        print(f"[GEOMETRY] GLB/glTF detected — rotating Y-up to Z-up")
+        print(f"[GEOMETRY] GLTF/GLB Y-up model detected: {file_path} — rotating to Z-up")
     else:
-        extents = mesh.bounds[1] - mesh.bounds[0]
+        # Heuristic: Buildings are usually wider and deeper than they are tall.
+        # If Y-extent is significantly smaller than X and Z extents, it's likely a Y-up model.
         if (extents[1] > 0
-                and extents[1] < extents[0] * 0.4
-                and extents[1] < extents[2] * 0.4):
+                and extents[1] < extents[0] * 0.8
+                and extents[1] < extents[2] * 0.8):
             needs_rotation = True
             print(
                 f"[GEOMETRY] Heuristic Y-up: extents X={extents[0]:.2f} "
@@ -139,24 +149,65 @@ def process_model(
     # --- FIX: Increase Floor Extraction Threshold ---
     # Capture vertices close to the floor to define the footprint
     floor_threshold = z_min + 1.0  # 1.0 meter tolerance as requested
-    floor_vertices = mesh.vertices[mesh.vertices[:, 2] < floor_threshold]
+    
+    # --- NEW: Robust Floor Footprint Extraction ---
+    # Determine the strict building interior by checking walls at 1.5m height
+    uncentered_walls = _extract_wall_segments(mesh, 0.0, 0.0, slice_height=1.5, min_length=0.2)
+    
+    exterior = None
+    
+    # 1. Primary Strategy: Wall-based footprint extraction
+    if uncentered_walls:
+        print(f"[GEOMETRY] Building footprint from {len(uncentered_walls)} wall segments...")
+        try:
+            from shapely.geometry import LineString, MultiLineString, Polygon
+            from shapely.ops import unary_union
+            
+            lines = [LineString([(w[0], w[1]), (w[2], w[3])]) for w in uncentered_walls]
+            mls = MultiLineString(lines)
+            
+            # Buffer walls by 0.6m to close windows and doors between segments
+            buffered_walls = mls.buffer(0.6, join_style=2)
+            union_poly = unary_union(buffered_walls)
+            
+            # Select the largest contiguous building block
+            if union_poly.geom_type == 'MultiPolygon':
+                main_poly = max(union_poly.geoms, key=lambda p: p.area)
+            else:
+                main_poly = union_poly
+                
+            if main_poly.geom_type == 'Polygon' and not main_poly.is_empty:
+                # We want a filled polygon (no holes). Create it from the exterior boundary.
+                footprint = Polygon(main_poly.exterior)
+                # Shrink it back by 0.6m so the boundary aligns tightly with the wall surface
+                footprint = footprint.buffer(-0.6, join_style=2)
+                # Simplify to remove zig-zags from low-poly noise
+                exterior = footprint.simplify(0.2)
+                print(f"[GEOMETRY] Extracted wall-based footprint (Area: {exterior.area:.2f})")
+        except Exception as e:
+            print(f"[GEOMETRY] Wall-based footprint failed: {e}")
 
-    print(f"[DEBUG] Floor vertices captured: {len(floor_vertices)}")
-    print(f"[DEBUG] Threshold: {floor_threshold:.2f}")
+    # 2. Fallback Strategy: Floor vertices concave hull (if no walls found or failed)
+    if exterior is None or exterior.is_empty or exterior.geom_type != "Polygon":
+        print("[GEOMETRY] Using fallback point-cloud concave hull for footprint.")
+        floor_points_candidates = mesh.vertices[mesh.vertices[:, 2] < floor_threshold][:, [0, 1]]
+        points_2d = floor_points_candidates.tolist()
+        
+        if len(points_2d) < 3:
+            print("[GEOMETRY] CRITICAL: Less than 3 points for footprint! Falling back to 10x10 square.")
+            points_2d = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
 
-    if len(floor_vertices) < 100:
-        print("[WARNING] Too few floor vertices - capturing ALL vertices for hull")
-        floor_vertices = mesh.vertices
+        print(f"[GEOMETRY] Extracting concave hull from {len(points_2d)} points...")
+        from shapely.geometry import MultiPoint
+        from shapely import concave_hull
+        mp = MultiPoint(points_2d)
 
-    # --- Concave hull for accurate L-shape / non-convex floor plans ---
-    points_2d = floor_vertices[:, [0, 1]]  # X, Y (since we are Z-up)
-    mp = MultiPoint(points_2d.tolist())
+        exterior = concave_hull(mp, ratio=0.3)
 
-    # ratio=0.3 — tight enough for concavities, robust for simple shapes
-    exterior = concave_hull(mp, ratio=0.3)
-
-    if exterior.geom_type != "Polygon" or exterior.is_empty:
-        exterior = mp.convex_hull  # fallback for degenerate cases
+        if exterior.geom_type == "MultiPolygon":
+            exterior = max(exterior.geoms, key=lambda p: p.area)
+        elif exterior.geom_type != "Polygon" or exterior.is_empty:
+            exterior = mp.convex_hull
     
     # --- Centering ---
     minx, miny, maxx, maxy = exterior.bounds
@@ -172,13 +223,16 @@ def process_model(
     floor_area = round(exterior.area, 2)
 
     # Buffer for navigation
-    buffered_exterior = exterior.buffer(-wall_buffer)
+    # We use a very small negative buffer for walls (-0.15 instead of -0.3) to avoid pinching off hallways.
+    buffered_exterior = exterior.buffer(-0.15)
     if buffered_exterior.is_empty or not buffered_exterior.is_valid:
         buffered_exterior = exterior  # Fallback
     
     # Handle MultiPolygon
     if isinstance(buffered_exterior, MultiPolygon):
-        buffered_exterior = max(buffered_exterior.geoms, key=lambda p: p.area)
+        # Instead of taking just one room, we take the convex hull of all the pieces
+        # or just fall back to the unbuffered exterior to keep the whole floor plan.
+        buffered_exterior = exterior
 
     boundaries = [[round(c[0], 6), round(c[1], 6)] for c in buffered_exterior.exterior.coords]
 
@@ -194,13 +248,16 @@ def process_model(
     centered_verts[:, 1] -= cy
     mesh_verts_list = centered_verts.tolist()
 
+    # Find the actual height of the floor (lowest Z vertex)
+    actual_floor_z = round(float(mesh.vertices[:, 2].min()), 4)
+
     return ExtractionResult(
         boundaries=boundaries,
         raw_boundaries=raw_boundaries,
         obstacles=obstacle_segments,
         center_offset=center_offset,
         floor_area=floor_area,
-        floor_z=floor_z,
+        floor_z=actual_floor_z,
         mesh_vertices=mesh_verts_list,
     )
 

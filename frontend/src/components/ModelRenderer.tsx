@@ -55,24 +55,29 @@ function filterPlaceholderMeshes(root: THREE.Object3D) {
  * So to align, we shift the model by (-cx, ?, cy) — i.e. the same centering
  * the geometry pipeline applied, but mapped to Three.js axes.
  */
-// No vertical lift — model floor sits flush with the simulation grid (y=0)
-const MODEL_Y_LIFT = -0.5;
-
+/**
+ * Ground the 3D model exactly at Y=0 (the simulation grid plane).
+ * -box.min.y lifts the lowest vertex of the model to exactly Y=0.
+ * XZ is aligned using the backend's centerOffset [cx, cy].
+ * Pipeline 2D axes: X→X, Y→-Z (because Three.js Z is depth, backend Y is depth).
+ */
 function computeAlignedPosition(
   root: THREE.Object3D,
   centerOffset?: [number, number],
 ): THREE.Vector3 {
   const box = new THREE.Box3().setFromObject(root);
+  // Lift: move the model so its absolute bottom is at Y=0
+  const groundY = -box.min.y;
 
   if (centerOffset) {
-    // Use geometry pipeline's center for XZ alignment
     const [cx, cy] = centerOffset;
-    return new THREE.Vector3(-cx, -box.min.y + MODEL_Y_LIFT, cy);
+    // Shift XZ: undo the centering the backend applied
+    return new THREE.Vector3(-cx, groundY, cy);
   }
 
-  // Fallback: use bounding box center
+  // Fallback: center on XZ using bounding box
   const center = box.getCenter(new THREE.Vector3());
-  return new THREE.Vector3(-center.x, -box.min.y + MODEL_Y_LIFT, -center.z);
+  return new THREE.Vector3(-center.x, groundY, -center.z);
 }
 
 // ---------------------------------------------------------------------------

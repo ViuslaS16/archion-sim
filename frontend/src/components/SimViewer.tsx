@@ -363,6 +363,7 @@ function AgentSwarm({
 
   const displayPosRef = useRef<Record<string, [number, number]>>({});
   const lastFrameIdx = useRef(-1);
+  const lastTrajectories = useRef<Trajectories | null>(null);
   const agentsRef = useRef<
     Record<string, { pos: [number, number]; type: "standard" | "specialist" }>
   >({});
@@ -386,9 +387,10 @@ function AgentSwarm({
       const idx = Math.min(frameRef.current, frameKeys.length - 1);
       const key = frameKeys[idx];
       if (key && trajectories[key]) {
-        if (idx !== lastFrameIdx.current) {
+        if (idx !== lastFrameIdx.current || trajectories !== lastTrajectories.current) {
           const jumped = Math.abs(idx - lastFrameIdx.current) > 2;
           lastFrameIdx.current = idx;
+          lastTrajectories.current = trajectories;
           agentsRef.current = trajectories[key] as typeof agentsRef.current;
           if (jumped) displayPosRef.current = {};
         }
@@ -775,6 +777,7 @@ interface SimViewerProps {
   modelUrl?: string;
   modelFormat?: "obj" | "glb" | "gltf";
   centerOffset?: [number, number];
+  floorZ?: number;
   violations?: Violation[];
   highlightedViolationId?: string | null;
   focusTarget?: { x: number; y: number; z: number } | null;
@@ -795,6 +798,7 @@ export default function SimViewer({
   modelUrl,
   modelFormat,
   centerOffset,
+  floorZ,
   violations = [],
   highlightedViolationId = null,
   focusTarget = null,
@@ -804,7 +808,7 @@ export default function SimViewer({
   onToggleHeatmap,
   viewMode = "3d",
 }: SimViewerProps) {
-  const isProcessing = phase === "simulating" || phase === "uploading";
+  const isProcessing = phase === "uploading";
   const hasModel = !!(modelUrl && modelFormat);
   const controlsRef = useRef<any>(null);
 
@@ -821,6 +825,7 @@ export default function SimViewer({
         <ambientLight intensity={0.6} />
         <directionalLight position={[5, 10, 5]} intensity={1.0} castShadow />
         <hemisphereLight args={["#334155", "#0f172a", 0.3]} />
+        <gridHelper args={[100, 100, "#333333", "#222222"]} position={[0, -0.01, 0]} />
 
         {/* 3D Model — when uploaded, this IS the visual.
             No blue floor/wall overlay is rendered on top. */}
@@ -879,11 +884,10 @@ export default function SimViewer({
       {heatmapData && onToggleHeatmap && (
         <button
           onClick={onToggleHeatmap}
-          className={`absolute top-4 right-4 z-10 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition ${
-            showHeatmap
-              ? "border-cyan-500 bg-cyan-500/20 text-cyan-300"
-              : "border-zinc-700 bg-zinc-900/90 text-zinc-400 hover:bg-zinc-800"
-          }`}
+          className={`absolute top-4 right-4 z-10 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition ${showHeatmap
+            ? "border-cyan-500 bg-cyan-500/20 text-cyan-300"
+            : "border-zinc-700 bg-zinc-900/90 text-zinc-400 hover:bg-zinc-800"
+            }`}
         >
           <Flame className="h-4 w-4" />
           {showHeatmap ? "Hide Heatmap" : "Show Heatmap"}
@@ -916,9 +920,7 @@ export default function SimViewer({
           <div className="flex flex-col items-center gap-3 rounded-xl bg-zinc-900/80 px-8 py-6 border border-zinc-700">
             <Loader2 className="h-8 w-8 animate-spin text-cyan-400" />
             <p className="text-sm font-medium text-zinc-300">
-              {phase === "simulating"
-                ? "Calculating Physics…"
-                : "Processing Model…"}
+              Processing Model…
             </p>
           </div>
         </div>
